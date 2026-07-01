@@ -10,11 +10,6 @@ __pycache__/
 data/*.csv
 app/model.pkl
 
-# Helper generator scripts (not part of submission)
-create_notebook.py
-generate_pdf.py
-make_diagrams.py
-
 # Reference files
 Assignment I.pdf
 Session 4_pipe-and-filter-code.py
@@ -28,3 +23,20 @@ Webinar1_ML System.pptx
 *.njsproj
 *.sln
 *.swp
+
++
++# Environment / secrets
++.env
++.env.*
++
++# Virtual environments
++venv/
++.venv/
++env/
++
++# OS files
++.DS_Store
++Thumbs.db
++
++# Logs
++*.log
