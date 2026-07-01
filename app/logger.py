@@ -20,9 +20,9 @@ class JsonFormatter(logging.Formatter):
                 if key not in [
                     "args", "asctime", "created", "exc_info", "exc_text", 
                     "filename", "funcName", "levelname", "levelno", "lineno", 
-                    "module", "msecs", "msg", "name", "pathname", "process", 
-                    "processName", "relativeCreated", "stack_info", "thread", 
-                    "threadName"
+                    "module", "msecs", "msg", "name", "pathname", "process",
+                    "processName", "relativeCreated", "stack_info", "thread",
+                    "threadName", "taskName"
                 ]:
                     log_record[key] = val
                     

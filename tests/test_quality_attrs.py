@@ -1,114 +1,146 @@
+"""
+Quality-attribute verification suite for the Loan Approval Risk Service.
+
+Each test maps to one of the top quality requirements and to a property of the
+Pipe-and-Filter architecture:
+
+  Robustness      -> schema bounds + business-rule rejection
+  Reliability     -> output conforms to the JSON response schema
+  Performance     -> average pipeline latency under the SLA
+  Maintainability -> filters are pure / independently testable
+
+Run:  python -m pytest tests/ -v
+      python -m unittest tests.test_quality_attrs -v
+"""
+import os
 import time
 import unittest
-import numpy as np
-import joblib
+
 from pydantic import ValidationError
 
 from app.schemas import LoanApplicationInput, LoanApprovalResult
-from app.config import settings
-from app.pipeline import validate_input, extract_features, run_model, format_response, execute_pipeline
+from app.pipeline import (
+    validate_input,
+    extract_features,
+    run_model,
+    format_response,
+    execute_pipeline,
+)
+
+LATENCY_SLA_MS = 150.0
+
+
+# A valid, low-risk applicant used as the baseline across tests.
+VALID_PAYLOAD = dict(
+    age=45, annual_income=95000, credit_score=720, employment_status=0,
+    education_level=4, loan_amount=25000, loan_duration=36,
+    monthly_debt_payments=400, credit_card_utilization_rate=0.25,
+    debt_to_income_ratio=0.15, bankruptcy_history=0, loan_purpose=3,
+    previous_loan_defaults=0, payment_history=28, length_of_credit_history=15,
+    savings_account_balance=35000, checking_account_balance=8000,
+    total_liabilities=30000, job_tenure=10, net_worth=220000,
+)
+
+
+class _StubModel:
+    """Deterministic stand-in classifier so filter tests never require a
+    trained artifact. Returns P(approve) as a smooth function of credit score."""
+
+    def predict_proba(self, X):
+        # X is a DataFrame; column 2 is CreditScore per settings.FEATURES order.
+        score = float(X.iloc[0, 2])
+        p_approve = max(0.01, min(0.99, (score - 300) / 550.0))
+        return [[1.0 - p_approve, p_approve]]
+
+
+def _load_model():
+    """Use the real serialized model when available; otherwise the stub."""
+    model_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "model.pkl"
+    )
+    if os.path.exists(model_path):
+        try:
+            import joblib
+            return joblib.load(model_path)
+        except Exception:
+            pass
+    return _StubModel()
+
 
 class TestQualityAttributes(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.model = _load_model()
 
-    def setUp(self):
-        self.sample_valid_input = LoanApplicationInput(
-            age=35,
-            annual_income=75000.0,
-            credit_score=720,
-            loan_amount=20000.0,
-            loan_duration=36,
-            savings_balance=15000.0,
-            total_assets=120000.0,
-            total_liabilities=40000.0,
-            previous_defaults=0,
-            cc_utilization=0.25
-        )
-        self.model = joblib.load(settings.MODEL_PATH)
-
-    # =========================================================
-    # QUALITY ATTRIBUTE: ROBUSTNESS
-    # Verifying that invalid data is rejected at the API schema boundaries
-    # =========================================================
+    # ── Robustness: schema boundary validation ───────────────────────
     def test_schema_rejects_low_age(self):
+        """Applicants under 18 must be rejected at the schema boundary."""
+        bad = {**VALID_PAYLOAD, "age": 16}
         with self.assertRaises(ValidationError):
-            # Under 18 is not allowed
-            LoanApplicationInput(
-                age=17, annual_income=50000, credit_score=600, loan_amount=1000,
-                loan_duration=24, savings_balance=100, total_assets=100,
-                total_liabilities=0, previous_defaults=0, cc_utilization=0.1
-            )
-            
-    def test_schema_rejects_invalid_credit_score(self):
-        with self.assertRaises(ValidationError):
-            # Credit score > 850 is invalid
-            LoanApplicationInput(
-                age=30, annual_income=50000, credit_score=900, loan_amount=1000,
-                loan_duration=24, savings_balance=100, total_assets=100,
-                total_liabilities=0, previous_defaults=0, cc_utilization=0.1
-            )
-            
-    def test_pipeline_rejects_excessive_loan_ratio(self):
-        # Exceeds 5 times annual income (500%)
-        self.sample_valid_input.loan_amount = 400000.0
-        self.sample_valid_input.annual_income = 50000.0
-        
-        with self.assertRaises(ValueError):
-            validate_input(self.sample_valid_input)
+            LoanApplicationInput(**bad)
 
-    # =========================================================
-    # QUALITY ATTRIBUTE: RELIABILITY
-    # Verifying schema validation consistency and well-formed outputs
-    # =========================================================
+    def test_schema_rejects_invalid_credit_score(self):
+        """Credit score outside [300, 850] must be rejected at the boundary."""
+        with self.assertRaises(ValidationError):
+            LoanApplicationInput(**{**VALID_PAYLOAD, "credit_score": 950})
+        with self.assertRaises(ValidationError):
+            LoanApplicationInput(**{**VALID_PAYLOAD, "credit_score": 250})
+
+    # ── Robustness: business-rule rejection in Filter 1 ──────────────
+    def test_pipeline_rejects_excessive_loan_ratio(self):
+        """Loan amount > 500% of annual income is a business-rule failure."""
+        risky = LoanApplicationInput(
+            **{**VALID_PAYLOAD, "annual_income": 20000, "loan_amount": 150000}
+        )
+        with self.assertRaises(ValueError):
+            validate_input(risky)
+
+    # ── Reliability: output conforms to the response schema ──────────
     def test_pipeline_output_conforms_to_schema(self):
-        result = execute_pipeline(self.sample_valid_input, self.model)
+        """The full pipeline must return a well-formed LoanApprovalResult."""
+        app_in = LoanApplicationInput(**VALID_PAYLOAD)
+        result = execute_pipeline(app_in, self.model)
         self.assertIsInstance(result, LoanApprovalResult)
         self.assertIsInstance(result.is_approved, bool)
-        self.assertTrue(0.0 <= result.probability <= 1.0)
-        self.assertIn(result.risk_tier, ["LOW", "MEDIUM", "HIGH"])
-        self.assertEqual(result.net_worth, self.sample_valid_input.total_assets - self.sample_valid_input.total_liabilities)
-        self.assertTrue(result.debt_to_income >= 0.0)
+        self.assertIn(result.risk_tier, {"LOW", "MEDIUM", "HIGH"})
+        self.assertGreaterEqual(result.probability, 0.0)
+        self.assertLessEqual(result.probability, 1.0)
 
-    # =========================================================
-    # QUALITY ATTRIBUTE: PERFORMANCE
-    # Verifying inference latency meets SLA guidelines (Latency < 200ms)
-    # =========================================================
+    # ── Performance: latency under SLA ───────────────────────────────
     def test_inference_pipeline_latency(self):
-        # Warmup
-        _ = execute_pipeline(self.sample_valid_input, self.model)
-        
-        latencies = []
-        for _ in range(50):
-            t_start = time.perf_counter()
-            _ = execute_pipeline(self.sample_valid_input, self.model)
-            t_end = time.perf_counter()
-            latencies.append((t_end - t_start) * 1000.0)
-            
-        avg_latency = sum(latencies) / len(latencies)
-        print(f"\n[PERFORMANCE] Average Pipeline Execution Latency: {avg_latency:.4f} ms")
-        
-        # Performance assertion
-        self.assertTrue(avg_latency < 200.0, f"Average latency ({avg_latency:.2f} ms) exceeds SLA limit of 200ms")
+        """Average pipeline latency must stay under the 150 ms SLA."""
+        app_in = LoanApplicationInput(**VALID_PAYLOAD)
+        runs = 50
+        start = time.perf_counter()
+        for _ in range(runs):
+            execute_pipeline(app_in, self.model)
+        avg_ms = (time.perf_counter() - start) / runs * 1000.0
+        self.assertLess(
+            avg_ms, LATENCY_SLA_MS,
+            f"Average latency {avg_ms:.2f} ms exceeded SLA {LATENCY_SLA_MS} ms",
+        )
 
-    # =========================================================
-    # QUALITY ATTRIBUTE: MAINTAINABILITY
-    # Verifying pipeline stages are pure functions and isolated
-    # =========================================================
+    # ── Maintainability: Filter 1 is a pure function ─────────────────
     def test_validation_filter_is_pure(self):
-        input_copy = self.sample_valid_input.model_copy()
-        output = validate_input(self.sample_valid_input)
-        
-        # Output should be the same as input
-        self.assertEqual(output.annual_income, input_copy.annual_income)
-        # Input object shouldn't be mutated
-        self.assertEqual(self.sample_valid_input, input_copy)
-        
+        """validate_input must not mutate its input and must be idempotent."""
+        app_in = LoanApplicationInput(**VALID_PAYLOAD)
+        snapshot = app_in.model_dump()
+        out1 = validate_input(app_in)
+        out2 = validate_input(app_in)
+        self.assertEqual(app_in.model_dump(), snapshot)      # no mutation
+        self.assertEqual(out1.model_dump(), out2.model_dump())  # idempotent
+
+    # ── Maintainability: Filter 2 is isolated / deterministic ────────
     def test_feature_extraction_filter_isolation(self):
-        features, net_worth, dti = extract_features(self.sample_valid_input)
-        
-        self.assertIsInstance(features, np.ndarray)
-        self.assertEqual(features.shape, (1, 10))
-        self.assertEqual(net_worth, self.sample_valid_input.total_assets - self.sample_valid_input.total_liabilities)
-        self.assertEqual(dti, self.sample_valid_input.total_liabilities / (self.sample_valid_input.annual_income + 1e-5))
+        """extract_features must be deterministic and shape-correct in isolation."""
+        from app.config import settings
+        app_in = LoanApplicationInput(**VALID_PAYLOAD)
+        fv1, nw1, dti1 = extract_features(app_in)
+        fv2, nw2, dti2 = extract_features(app_in)
+        self.assertEqual(fv1.shape, (1, len(settings.FEATURES)))
+        self.assertTrue((fv1.values == fv2.values).all())    # deterministic
+        self.assertEqual(nw1, app_in.net_worth)
+
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)

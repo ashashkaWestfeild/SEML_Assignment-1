@@ -8,16 +8,28 @@ model:
   path: "app/model.pkl"
   default_threshold: 0.50
   features:
-    - age
-    - annual_income
-    - credit_score
-    - loan_amount
-    - loan_duration
-    - savings_balance
-    - total_assets
-    - total_liabilities
-    - previous_defaults
-    - cc_utilization
+    - Age
+    - AnnualIncome
+    - CreditScore
+    - EmploymentStatus
+    - EducationLevel
+    - LoanAmount
+    - LoanDuration
+    - MonthlyDebtPayments
+    - CreditCardUtilizationRate
+    - DebtToIncomeRatio
+    - BankruptcyHistory
+    - LoanPurpose
+    - PreviousLoanDefaults
+    - PaymentHistory
+    - LengthOfCreditHistory
+    - SavingsAccountBalance
+    - CheckingAccountBalance
+    - TotalLiabilities
+    - JobTenure
+    - NetWorth
+    - LoanToIncomeRatio
+    - SavingsToLoanRatio
 
 logging:
   level: "INFO"
